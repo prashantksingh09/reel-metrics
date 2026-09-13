@@ -1,0 +1,11 @@
+{
+  "name": "reel-metrics-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "description": "Cloudflare Worker that polls Instagram reel insights and keeps the history Meta doesn't",
+  "license": "MIT"
+}

@@ -1,0 +1,19 @@
+# Secrets. Nothing here should ever reach a commit.
+.env
+.deploy-info
+.dev.vars
+*.pem
+
+# Your own account's data, produced by phase0/probe.py
+phase0_dump_*.json
+
+# Local state
+.wrangler/
+node_modules/
+__pycache__/
+*.pyc
+data/
+*.db
+
+# macOS
+.DS_Store

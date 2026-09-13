@@ -1,0 +1,13 @@
+name = "reel-metrics"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# Every 15 minutes. The handler decides per tick whether it is a full sweep
+# (top of the hour) or just the recent reels.
+[triggers]
+crons = ["*/15 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "reel-metrics"
+database_id = "PASTE_THE_ID_FROM_d1_create_HERE"

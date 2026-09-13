@@ -1,0 +1,61 @@
+# Keeps the metrics collecting when Cloudflare's cron doesn't.
+#
+# Cloudflare Cron Triggers proved unreliable for this Worker: registered in the
+# dashboard, listed correctly, and simply not firing -- three stalls in four
+# days, the longest over 24 hours. The Worker already exposes POST /poll, so
+# anything that can make an HTTP request on a schedule can drive it.
+#
+# This runs alongside the Worker's own cron rather than replacing it. Duplicate
+# polls cost nothing: storage is change-only, so a poll that finds nothing new
+# writes nothing.
+
+name: Poll reel metrics
+
+on:
+  schedule:
+    # Every 10 minutes, to get an effective cadence near the 15 we actually
+    # want. GitHub's scheduler runs late under load and occasionally skips a
+    # slot entirely, so asking more often than needed is the cheapest
+    # insurance -- and duplicates are free.
+    - cron: "*/10 * * * *"
+  # Lets you trigger a poll by hand from the Actions tab.
+  workflow_dispatch:
+
+# Never run two polls at once; a slow one should be skipped, not queued.
+concurrency:
+  group: poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trigger a poll
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          API_KEY: ${{ secrets.API_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${WORKER_URL:-}" ] || [ -z "${API_KEY:-}" ]; then
+            echo "::error::WORKER_URL or API_KEY is not set. Add both under"
+            echo "::error::Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+          # The key goes in a header, not the query string: a URL can end up in
+          # curl's own error output, in a redirect, or in a proxy log. A header
+          # does not.
+          body=$(curl -sS -X POST \
+            -H "Authorization: Bearer ${API_KEY}" \
+            --max-time 60 --retry 2 --retry-delay 5 \
+            "${WORKER_URL%/}/poll?scope=all")
+
+          echo "$body"
+
+          # Exit non-zero on a failed poll so the run goes red and GitHub
+          # emails you, rather than reporting success on a dead collector.
+          echo "$body" | node .github/scripts/check-poll.mjs

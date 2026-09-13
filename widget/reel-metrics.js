@@ -26,7 +26,7 @@
 // ---------------------------------------------------------------------------
 
 const CONFIG = {
-  // Filled from worker/.deploy-info. BOTH VALUES MUST BE IN QUOTES --
+  // From worker/.deploy-info after you deploy. BOTH VALUES MUST BE IN QUOTES --
   // without them JavaScript reads these as variable names and the script
   // dies with "ReferenceError: ... is not defined" before doing anything.
   url: "https://reel-metrics.YOUR-SUBDOMAIN.workers.dev",
@@ -57,18 +57,26 @@ function configProblem() {
 const BASE = String(CONFIG.url || "").trim().replace(/\/+$/, "");
 const KEY = String(CONFIG.key || "").trim();
 
-// Instagram's palette, minus the pale yellow end which white text cannot sit
-// on. The logo and wordmark are deliberately absent -- those are theirs.
-const GRAD = ["#833AB4", "#C13584", "#E1306C", "#F56040"];
+// Instagram's palette pulled 30% toward neutral grey. Muting the colours
+// directly rather than making the widget translucent keeps it identical on a
+// light and a dark home screen -- a translucent version measured 2.5:1 against
+// white text on a light wallpaper, which is unreadable outdoors.
+// Measured 3.73:1 for white text on the worst stop: marginally better than the
+// fully saturated original.
+const GRAD = ["#8857B2", "#A84F9B", "#C34473", "#D0635D"];
+
+// Secondary text was 74% and 56% white, landing at 2.7:1 and 2.2:1 -- which is
+// why those lines read as faint rather than merely quiet. Raised as far as the
+// hierarchy allows: pushing everything to 100% would fix contrast and flatten
+// the design into one shouting voice.
 const INK = new Color("#FFFFFF");
-const DIM = new Color("#FFFFFF", 0.72);
-const FAINT = new Color("#FFFFFF", 0.45);
-const SCRIM = new Color("#000000", 0.22);
+const DIM = new Color("#FFFFFF", 0.90);
+const FAINT = new Color("#FFFFFF", 0.78);
 
 // ---------------------------------------------------------------- formatting
 
 /** Full digits while precision matters, compact once it stops.
- *  2,026 reads better than "2.0K" on a reel posted this morning;
+ *  2,026 reads better than "2.0K" on a reel you posted this morning;
  *  287,473 does not need its last three digits. */
 function fmt(n) {
   if (n == null || isNaN(n)) return "—";
@@ -99,8 +107,16 @@ function fmtMs(ms) {
 function fmtAge(hours) {
   if (hours == null) return "";
   if (hours < 1) return Math.round(hours * 60) + "m";
-  if (hours < 48) return hours.toFixed(1).replace(/\.0$/, "") + "h";
-  return Math.round(hours / 24) + "d";
+  // Floored, not rounded, and switching to days at exactly 24h.
+  //
+  // Rounding produced two wrong answers. At 23.9 hours it said "24h", a unit
+  // that should not exist. And a 47.7-hour reel became "2d" while Instagram
+  // itself calls the same reel "1d" -- a disagreement you would notice
+  // immediately, since the widget sits next to the app it is reporting on.
+  // Flooring matches how elapsed time is counted everywhere: you are 1 day
+  // old until the moment you are 2.
+  if (hours < 24) return Math.floor(hours) + "h";
+  return Math.floor(hours / 24) + "d";
 }
 
 function clockOf(iso) {
@@ -109,12 +125,29 @@ function clockOf(iso) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-/** Bar length by order of magnitude. Linear would render every reel but the
- *  outlier as a nub. Floored at 12% so the smallest bar is still a bar. */
-function logFrac(v, max) {
-  if (!v || v <= 0 || !max || max <= 0) return 0.12;
-  const f = Math.log10(v) / Math.log10(Math.max(max, 10));
-  return Math.max(0.12, Math.min(1, f));
+/** Bar length, stretched between the smallest and largest tracked reel.
+ *
+ *  Scaling against the maximum alone crowds everything at the top: five reels
+ *  spanning 2.4k to 300k rendered as 62/62/100/71/68, which says almost
+ *  nothing about the four ordinary ones. Normalising between min and max
+ *  separates them.
+ *
+ *  The guard matters. Normalising assumes there IS a spread; when every reel
+ *  lands within roughly 2x of the others -- an ordinary week -- the same maths
+ *  magnifies a 1.7x difference into a 10x-looking chart. Below that threshold
+ *  the bars compress toward the middle instead, so a quiet week reads as one.
+ *
+ *  Floored at 14%, not 0: at 10% the smallest reel's fill was so short it read
+ *  as an empty track rather than a low bar. */
+function barFrac(v, min, max) {
+  const lv = Math.log10(Math.max(v || 1, 1));
+  const lo = Math.log10(Math.max(min || 1, 1));
+  const hi = Math.log10(Math.max(max || 10, 10));
+  const span = hi - lo;
+  if (!isFinite(span) || span <= 0) return 0.6;
+  const t = Math.max(0, Math.min(1, (lv - lo) / span));
+  if (span < 0.3) return 0.55 + 0.30 * t;
+  return 0.14 + 0.86 * t;
 }
 
 // -------------------------------------------------------------------- data
@@ -178,6 +211,45 @@ function shell() {
   return w;
 }
 
+/** SF Symbols stand in for the SVG icons in the design: Scriptable renders no
+ *  SVG, and Apple's set is both closer to the mockup and native to iOS.
+ *  Wrapped because a missing symbol name throws, and a widget that throws
+ *  shows a blank rectangle with no way to tell why. */
+function icon(stack, name, size) {
+  try {
+    const sym = SFSymbol.named(name);
+    if (!sym) return null;
+    sym.applyFont(Font.systemFont(size));
+    const img = stack.addImage(sym.image);
+    img.imageSize = new Size(size, size);
+    img.tintColor = INK;
+    img.resizable = false;
+    return img;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Fixed because a flexible stack cannot report its own width, and the fill
+// has to be drawn as a fraction of the track.
+const BAR_W = 186;
+
+const STATS = [
+  { key: "likes",    sym: "heart.fill" },
+  { key: "comments", sym: "bubble.right" },
+  { key: "shares",   sym: "arrow.up" },
+  { key: "saved",    sym: "bookmark.fill" },
+];
+
+/** One icon + number pair. */
+function statPair(row, sym, value, size, gap) {
+  const cell = row.addStack();
+  cell.centerAlignContent();
+  cell.spacing = gap;
+  icon(cell, sym, size);
+  label(cell, fmt(value), size + 0.5, INK, "bold");
+}
+
 function label(stack, text, size, color, weight) {
   const t = stack.addText(text);
   t.font = weight === "bold" ? Font.boldSystemFont(size)
@@ -235,160 +307,230 @@ function sparkline(series, width, height) {
 
 // ----------------------------------------------------------------- layouts
 
-function bigNumber(w, reel, windowKey) {
-  const views = reel?.metrics?.views;
-  label(w, fmt(views), 34, INK, "bold");
-
+/** The headline number, its delta, and what the delta measures.
+ *
+ *  Laid out per size rather than one arrangement for all three. Putting the
+ *  number, the delta and the label on a single row needs ~177pt on the small
+ *  widget, which has 132 -- Scriptable's answer to that is to truncate, so the
+ *  view count rendered as "2,4…". The medium was overflowing too, just not
+ *  visibly yet.
+ *
+ *    small   number
+ *            +3  views · 1h
+ *    medium  number  +120
+ *            views · last 1h
+ *    large   number  +120  views · last 1h        (306pt: fits)
+ */
+function headline(stack, reel, windowKey, size, mode) {
+  const views = fmt(reel?.metrics?.views);
   const d = reel?.deltas?.views?.[windowKey];
-  const txt = fmtDelta(d);
-  const row = w.addStack();
-  row.centerAlignContent();
-  if (txt == null) {
-    label(row, "collecting…", 11, FAINT, "medium");
-  } else {
-    label(row, txt, 12, INK, "bold");
-    label(row, "  views · " + windowKey, 11, DIM);
+  const delta = fmtDelta(d);
+  const span = mode === "small" ? `views · ${windowKey}` : `views · last ${windowKey}`;
+
+  const col = stack.addStack();
+  col.layoutVertically();
+  col.spacing = 2;
+
+  if (mode === "large") {
+    const row = col.addStack();
+    row.bottomAlignContent();
+    row.spacing = 8;
+    label(row, views, size, INK, "bold");
+    if (delta == null) { label(row, "collecting…", 11.5, FAINT, "medium"); return; }
+    label(row, delta, 11.5, INK, "bold");
+    label(row, span, 11.5, DIM);
+    return;
   }
+
+  if (mode === "medium") {
+    const top = col.addStack();
+    top.bottomAlignContent();
+    top.spacing = 8;
+    label(top, views, size, INK, "bold");
+    if (delta != null) label(top, delta, 11.5, INK, "bold");
+    label(col, delta == null ? "collecting…" : span, 11.5,
+          delta == null ? FAINT : DIM, delta == null ? "medium" : undefined);
+    return;
+  }
+
+  // small: the number gets a line to itself, because it is the whole point of
+  // this size and the only thing that must never be abbreviated.
+  label(col, views, size, INK, "bold");
+  const line = col.addStack();
+  line.centerAlignContent();
+  line.spacing = 6;
+  if (delta == null) {
+    label(line, "collecting…", 11.5, FAINT, "medium");
+  } else {
+    label(line, delta, 11.5, INK, "bold");
+    label(line, span, 11.5, DIM);
+  }
+}
+
+/** Views over the window, full width. This is what fills the space the old
+ *  large layout left empty. */
+function sparkRow(stack, reel, width, height) {
+  const img = sparkline(reel?.views_series, width, height);
+  if (img) {
+    const w = stack.addImage(img);
+    w.resizable = false;
+  } else {
+    // No series yet: hold the space rather than letting everything below jump
+    // up by 30pt once history arrives.
+    stack.addSpacer(height);
+  }
+}
+
+function hairline(stack) {
+  const r = stack.addStack();
+  r.size = new Size(0, 1);
+  r.backgroundColor = new Color("#FFFFFF", 0.24);
+}
+
+/** The four stats. On the small widget, four columns of five-digit numbers do
+ *  not fit -- so once the values get long it drops the least-consulted one.
+ *  Likes, comments and shares survive; saves is the one that goes. */
+function statsRow(stack, metrics, size, gap, allowDrop) {
+  const m = metrics || {};
+  let set = STATS;
+  if (allowDrop) {
+    const width = STATS.reduce((n, st) => n + fmt(m[st.key]).length, 0);
+    if (width > 14) set = STATS.slice(0, 3);
+  }
+  const row = stack.addStack();
+  row.centerAlignContent();
+  set.forEach((st, i) => {
+    statPair(row, st.sym, m[st.key], size, 4);
+    if (i < set.length - 1) row.addSpacer();
+  });
+  return row;
 }
 
 function smallWidget(w, data) {
   header(w, data);
-  w.addSpacer(6);
   const reel = data.body?.latest;
-  if (!reel) { label(w, "no data yet", 13, DIM); return; }
-  bigNumber(w, reel, "1h");
-  w.addSpacer();
-  const foot = w.addStack();
-  foot.centerAlignContent();
-  label(foot, fmtAge(reel.age_hours) + " old", 10, FAINT);
-  foot.addSpacer();
-  label(foot, fmt(reel.metrics?.likes) + " ♥", 10, FAINT);
-}
+  if (!reel) { w.addSpacer(6); label(w, "no data yet", 13, DIM); return; }
 
-function statCell(row, value, name) {
-  const cell = row.addStack();
-  cell.layoutVertically();
-  label(cell, value, 14, INK, "bold");
-  label(cell, name, 9, FAINT);
+  w.addSpacer();
+  headline(w, reel, "1h", 31, "small");
+  w.addSpacer(7);
+  sparkRow(w, reel, 130, 26);
+  w.addSpacer(7);
+  statsRow(w, reel.metrics, 11, 4, true);
 }
 
 function mediumWidget(w, data) {
   header(w, data);
-  w.addSpacer(4);
   const reel = data.body?.latest;
-  if (!reel) { label(w, "no data yet", 13, DIM); return; }
+  if (!reel) { w.addSpacer(6); label(w, "no data yet", 13, DIM); return; }
 
+  w.addSpacer(5);
   const body = w.addStack();
-  body.layoutHorizontally();
+  body.bottomAlignContent();
+  body.spacing = 12;
 
   const left = body.addStack();
   left.layoutVertically();
-  bigNumber(left, reel, "1h");
-  left.addSpacer(4);
-  label(left, fmtAge(reel.age_hours) + " old · " + (reel.caption || "").slice(0, 22), 9, FAINT);
+  headline(left, reel, "1h", 33, "medium");
 
-  body.addSpacer();
+  sparkRow(body, reel, 150, 34);
 
-  const right = body.addStack();
-  right.layoutVertically();
-  const spark = sparkline(reel.views_series, 100, 34);
-  if (spark) {
-    const img = right.addImage(spark);
-    img.resizable = false;
-  } else {
-    right.addSpacer(34);
-  }
-
+  w.addSpacer(9);
+  hairline(w);
   w.addSpacer(8);
-  const stats = w.addStack();
-  stats.layoutHorizontally();
-  const m = reel.metrics || {};
-  statCell(stats, fmt(m.likes), "likes"); stats.addSpacer();
-  statCell(stats, fmt(m.comments), "comments"); stats.addSpacer();
-  statCell(stats, fmt(m.shares), "shares"); stats.addSpacer();
-  statCell(stats, fmt(m.saved), "saved"); stats.addSpacer();
-  statCell(stats, fmtMs(m.ig_reels_avg_watch_time), "avg watch");
+
+  const row = statsRow(w, reel.metrics, 14, 5, false);
+  row.addSpacer();
+  const watch = reel.metrics?.ig_reels_avg_watch_time;
+  if (watch != null) label(row, `${fmtMs(watch)} avg watch`, 10.5, FAINT);
 }
 
-function reelRow(stack, reel, maxViews, rank) {
+/** One reel: a track, its fill, the number and the age.
+ *  Track width is fixed rather than flexible because the fill has to be drawn
+ *  as a fraction of it, and a flexible stack cannot report its own width. */
+function reelRow(stack, reel, min, max) {
   const row = stack.addStack();
   row.centerAlignContent();
+  row.spacing = 9;
+
   const link = TAP_OPENS_REEL ? safeUrl(reel.permalink) : null;
   if (link) row.url = link;
 
-  label(row, String(rank), 9, FAINT);
-  row.addSpacer(6);
+  const track = row.addStack();
+  track.size = new Size(BAR_W, 7);
+  track.backgroundColor = new Color("#FFFFFF", 0.26);
+  track.cornerRadius = 3.5;
 
-  const barWrap = row.addStack();
-  barWrap.layoutVertically();
-  barWrap.size = new Size(118, 12);
-  const bar = barWrap.addStack();
-  bar.size = new Size(Math.round(118 * logFrac(reel.metrics?.views, maxViews)), 7);
-  bar.backgroundColor = new Color("#FFFFFF", 0.82);
-  bar.cornerRadius = 3.5;
+  const fill = track.addStack();
+  fill.size = new Size(
+    Math.max(6, Math.round(BAR_W * barFrac(reel.metrics?.views, min, max))), 7);
+  fill.backgroundColor = new Color("#FFFFFF", 0.92);
+  fill.cornerRadius = 3.5;
 
-  row.addSpacer(8);
-  const n = label(row, fmt(reel.metrics?.views), 12, INK, "bold");
-  n.lineLimit = 1;
   row.addSpacer();
-  label(row, fmtAge(reel.age_hours), 9, FAINT);
+  const num = row.addStack();
+  num.size = new Size(58, 0);
+  num.addSpacer();
+  label(num, fmt(reel.metrics?.views), 12.5, INK, "bold");
+
+  const age = row.addStack();
+  age.size = new Size(26, 0);
+  age.addSpacer();
+  label(age, fmtAge(reel.age_hours), 10, FAINT);
 }
 
 function largeWidget(w, data) {
   header(w, data);
-  w.addSpacer(4);
   const b = data.body;
-  if (!b || !b.reels?.length) { label(w, "no data yet", 13, DIM); return; }
+  if (!b || !b.reels?.length) { w.addSpacer(6); label(w, "no data yet", 13, DIM); return; }
 
-  mediumTop(w, b.latest);
+  w.addSpacer(7);
+  headline(w, b.latest, "1h", 37, "large");
+  w.addSpacer(7);
+  sparkRow(w, b.latest, 300, 30);
+
+  w.addSpacer(8);
+  hairline(w);
+  w.addSpacer(7);
+  statsRow(w, b.latest?.metrics, 14, 5, false);
+
+  const m = b.latest?.metrics || {};
+  if (m.reels_skip_rate != null || m.ig_reels_avg_watch_time != null) {
+    w.addSpacer(4);
+    const bits = [];
+    if (m.reels_skip_rate != null) bits.push(`${m.reels_skip_rate.toFixed(0)}% skipped`);
+    if (m.ig_reels_avg_watch_time != null) bits.push(`${fmtMs(m.ig_reels_avg_watch_time)} avg watch`);
+    label(w, bits.join(" · "), 10.5, FAINT);
+  }
 
   w.addSpacer(9);
   const cap = w.addStack();
   cap.centerAlignContent();
   label(cap, "RECENT REELS", 9, FAINT, "medium");
   cap.addSpacer();
-  label(cap, "log scale", 8, FAINT);
-  w.addSpacer(5);
+  label(cap, "log scale", 9.5, FAINT);
+  w.addSpacer(6);
 
-  const maxViews = Math.max(...b.reels.map((r) => r.metrics?.views || 0));
+  const views = b.reels.map((r) => r.metrics?.views || 0).filter((v) => v > 0);
+  const min = views.length ? Math.min(...views) : 1;
+  const max = views.length ? Math.max(...views) : 10;
+
   const list = w.addStack();
   list.layoutVertically();
-  list.spacing = 5;
-  b.reels.forEach((r, i) => reelRow(list, r, maxViews, i + 1));
+  list.spacing = 4;
+  b.reels.forEach((r) => reelRow(list, r, min, max));
 
   w.addSpacer();
   const foot = w.addStack();
   foot.centerAlignContent();
   const acc = b.account?.metrics || {};
   const fd = b.account?.followers_delta_7d;
-  label(foot, fmt(acc.followers_count) + " followers", 10, DIM, "medium");
-  if (fd != null && fd !== 0) label(foot, "  " + fmtDelta(fd) + " /7d", 10, FAINT);
+  label(foot, `${fmt(acc.followers_count)} followers`, 12, DIM, "medium");
+  if (fd != null && fd !== 0) label(foot, `  ${fmtDelta(fd)}`, 12, FAINT);
   foot.addSpacer();
-  // Account reach is a DAILY figure that resets, not a running total, so it
-  // is labelled as such and never called "total".
-  if (acc.reach != null) label(foot, fmt(acc.reach) + " reach today", 10, FAINT);
-}
-
-function mediumTop(w, reel) {
-  if (!reel) return;
-  const body = w.addStack();
-  body.layoutHorizontally();
-  const left = body.addStack();
-  left.layoutVertically();
-  bigNumber(left, reel, "1h");
-  left.addSpacer(3);
-  const m = reel.metrics || {};
-  label(left, `${fmt(m.likes)} ♥  ${fmt(m.comments)} ✎  ${fmt(m.shares)} ↗  ${fmt(m.saved)} ⌘`,
-    10, DIM);
-  if (m.reels_skip_rate != null) {
-    label(left, `${m.reels_skip_rate.toFixed(0)}% skipped · ${fmtMs(m.ig_reels_avg_watch_time)} avg watch`,
-      9, FAINT);
-  }
-  body.addSpacer();
-  const right = body.addStack();
-  right.layoutVertically();
-  const spark = sparkline(reel.views_series, 96, 40);
-  if (spark) right.addImage(spark).resizable = false;
+  // Account reach is a DAILY figure that resets, not a running total, so it is
+  // labelled as such and never called "total".
+  if (acc.reach != null) label(foot, `${fmt(acc.reach)} reach today`, 12, FAINT);
 }
 
 // -------------------------------------------------------------------- main

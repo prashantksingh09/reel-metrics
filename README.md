@@ -141,14 +141,56 @@ normalised, which is why it's tracked.
 
 ---
 
+## Don't trust Cloudflare's cron on its own
+
+This is the one thing that will bite you, and it is why there is a GitHub
+Actions workflow in this repo.
+
+Cloudflare Cron Triggers stalled three times in four days on this Worker —
+registered in the dashboard, listed correctly, and simply not firing. The
+longest silence was over 24 hours, during which the widget kept showing
+plausible numbers from the last successful poll. Nothing looked broken.
+
+So `.github/workflows/poll.yml` drives collection from outside, hitting
+`POST /poll` every 10 minutes. It runs *alongside* the Worker's own cron
+rather than replacing it — duplicate polls cost nothing, because storage is
+change-only and a poll that finds nothing new writes nothing.
+
+To enable it, add two repository secrets under **Settings → Secrets and
+variables → Actions**:
+
+| Secret | Value |
+|---|---|
+| `WORKER_URL` | `https://your-worker.workers.dev` |
+| `API_KEY` | the key from `worker/.deploy-info` |
+
+Then **Actions → Poll reel metrics → Run workflow** to test it immediately.
+The run goes red if the Worker reports a failed poll, so a dead token emails
+you instead of dying quietly.
+
+Two GitHub behaviours worth knowing:
+
+- **Scheduled workflows drift.** GitHub runs them late under load and
+  occasionally skips a slot. That is why the cron asks for every 10 minutes
+  to land near a real 15.
+- **In a public repository, scheduled workflows are disabled automatically
+  after 60 days with no repository activity.** GitHub emails you first, and
+  re-enabling is one click. Any commit resets the clock.
+
+Actions minutes are free on public repositories, so this costs nothing.
+
+## Measuring whether it is actually working
+
+`GET /health` reports `polls_24h` against the 96 a 15-minute cron should
+produce, plus the worst gap between consecutive polls. `node check.mjs` prints
+it as *steady* / *intermittent* / *badly degraded*.
+
+That distinction matters more than it sounds: `last_poll_at` alone looks
+identical on a healthy collector and on one that fired once and stopped for a
+day. Ask how many, not how recently.
+
 ## Known constraints
 
-- **Cloudflare's cron triggers proved unreliable** in practice — several
-  multi-hour stalls where the trigger was registered and simply didn't fire.
-  `GET /health` reports `polls_24h` against the 96 expected and the worst gap
-  between polls, so you can measure this rather than guess. If it stalls for
-  you too, point any external cron service at `POST /poll?key=…` and take
-  Cloudflare's scheduler out of the critical path.
 - **A reel stops being tracked once five newer ones exist.** Its stored history
   is kept, just not extended. Raise `REELS_TRACKED` in `worker/src/config.js`.
 - **Account-level `views` and `reach` are daily figures that reset**, not
